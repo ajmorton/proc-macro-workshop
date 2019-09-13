@@ -39,17 +39,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
         None
     }
 
-    // TODO: pick up here, ~ 1:32:37 in stream
-    // let unwrap_t = |t: &syn::Type| -> syn::Type {
-    //     if let Path(ref t_path) = t {
-    //         if let AngleBracketed(inner_type) = t_path.path.segments[0].arguments {
-    //         } else {
-    //             panic!("Cannot unwrap inner type from Option<inner_type>");
-    //         }
-    //     }
-    //     unreachable!();
-    // };
-
     let opt_fields = fields.iter().map(|f| {
         let inner_name = &f.ident;
         let inner_type = &f.ty;
