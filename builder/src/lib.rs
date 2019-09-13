@@ -1,17 +1,10 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
-use syn::{
-    parse_macro_input,
-    DeriveInput,
-    Ident,
-    Data::Struct,
-    DataStruct,
-    Fields::Named,
-    FieldsNamed,
-    Type::Path
-};
 use quote::quote;
-
+use syn::{
+    parse_macro_input, Data::Struct, DataStruct, DeriveInput, Fields::Named, FieldsNamed, Ident,
+    PathArguments::AngleBracketed, Type::Path,
+};
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -20,28 +13,39 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let ident_builder = Ident::new(&format!("{}Builder", ident), ident.span());
 
     // untangling this gnarly path plagiarized directly from jonhoo's stream on this workshop
-    let fields = if let Struct(DataStruct{
-        fields: Named(FieldsNamed{
-            ref named,
-            ..
-        }),
+    let fields = if let Struct(DataStruct {
+        fields: Named(FieldsNamed { ref named, .. }),
         ..
-    }) = tree.data {
+    }) = tree.data
+    {
         named
-    } else { unimplemented!() }; // TODO: Think about how to enable enums and unions
-    
-    let is_optional = |t: &syn::Type| {
+    } else {
+        unimplemented!()
+    }; // TODO: Think about how to enable enums and unions
+
+    fn unwrap_inner_type(t: &syn::Type) -> Option<&syn::Type> {
         if let Path(ref t_path) = t {
-            return t_path.path.segments.len() == 1 
-                    && t_path.path.segments[0].ident == "Option";
+            if t_path.path.segments.len() == 1 && t_path.path.segments[0].ident == "Option" {
+                if let AngleBracketed(ref inner_type) = t_path.path.segments[0].arguments {
+                    if inner_type.args.len() == 1 {
+                        let inner = inner_type.args.first().unwrap();
+                        if let syn::GenericArgument::Type(ref t) = inner {
+                            return Some(t);
+                        }
+                    }
+                }
+            }
         }
-        false
-    };
-    
+        None
+    }
+
     // TODO: pick up here, ~ 1:32:37 in stream
     // let unwrap_t = |t: &syn::Type| -> syn::Type {
     //     if let Path(ref t_path) = t {
-    //        assert!(t_path.path.segments.len() == 1 && t_path.path.segments[0].ident == "Option");
+    //         if let AngleBracketed(inner_type) = t_path.path.segments[0].arguments {
+    //         } else {
+    //             panic!("Cannot unwrap inner type from Option<inner_type>");
+    //         }
     //     }
     //     unreachable!();
     // };
@@ -49,7 +53,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let opt_fields = fields.iter().map(|f| {
         let inner_name = &f.ident;
         let inner_type = &f.ty;
-        if is_optional(&f.ty) {
+        if unwrap_inner_type(&f.ty).is_some() {
             quote! {
                 #inner_name: #inner_type
             }
@@ -63,14 +67,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let methods = fields.iter().map(|f| {
         let inner_name = &f.ident;
         let inner_type = &f.ty;
-        if is_optional(&f.ty) {
+        if let Some(inner_type) = unwrap_inner_type(&f.ty) {
             quote! {
                 pub fn #inner_name(&mut self, #inner_name: #inner_type) -> &mut Self {
-                    self.#inner_name = #inner_name;
+                    self.#inner_name = Some(#inner_name);
                     self
                 }
             }
-        
         } else {
             quote! {
                 pub fn #inner_name(&mut self, #inner_name: #inner_type) -> &mut Self {
@@ -80,18 +83,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
     });
-    
-    let nil_fields= fields.iter().map(|f| {
+
+    let nil_fields = fields.iter().map(|f| {
         let inner_name = &f.ident;
         quote! {
             #inner_name: None
         }
     });
 
-
     let build_fields = fields.iter().map(|f| {
         let inner_name = &f.ident;
-        if is_optional(&f.ty) {
+        if unwrap_inner_type(&f.ty).is_some() {
             quote! {
                 #inner_name: self.#inner_name.clone()
             }
@@ -123,7 +125,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     #(#build_fields,)*
                 })
             }
-            
+
             #(#methods)*
 
         }
