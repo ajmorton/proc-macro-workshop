@@ -1,6 +1,5 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
-use proc_macro2::TokenTree;
 use quote::quote;
 use syn::{
     parse_macro_input, Data::Struct, DataStruct, DeriveInput, Fields::Named, FieldsNamed, Ident,
@@ -42,38 +41,50 @@ pub fn derive(input: TokenStream) -> TokenStream {
         None
     }
 
-    fn builder_of(f: &syn::Field) -> Option<proc_macro2::Group> {
+    fn builder_of(f: &syn::Field) -> Option<&syn::Attribute> {
         for attr in &f.attrs {
             if attr.path.segments.len() == 1 && attr.path.segments[0].ident == "builder" {
-                let mut stream = attr.tokens.clone().into_iter();
-                if let Some(proc_macro2::TokenTree::Group(group)) = stream.next() {
-                    return Some(group);
-                }
+                return Some(attr);
             }
         }
         None
     }
 
+    fn gen_error<M: quote::ToTokens>(meta: M) -> Option<(bool, proc_macro2::TokenStream)> {
+        Some((
+            false,
+            syn::Error::new_spanned(meta, "expected `builder(each = \"...\")`").to_compile_error(),
+        ))
+    }
+
     fn extend_method(f: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
         let name = f.ident.as_ref().unwrap();
         let group = builder_of(f)?;
-        let mut tokens = group.stream().into_iter();
+        let meta = match group.parse_meta() {
+            Ok(syn::Meta::List(mut value_pairs)) => {
+                assert_eq!(value_pairs.path.segments[0].ident, "builder");
+                if value_pairs.nested.len() != 1 {
+                    return gen_error(value_pairs);
+                }
 
-        match tokens.next().unwrap() {
-            TokenTree::Ident(ref i) => assert_eq!("each", i.to_string()),
-            _ => panic!("Not an ident or punct"),
-        }
-        match tokens.next().unwrap() {
-            TokenTree::Punct(ref p) => assert_eq!('=', p.as_char()),
-            _ => panic!("Not an ident or punct"),
-        }
-
-        let arg = match tokens.next().unwrap() {
-            TokenTree::Literal(lit) => lit,
-            _ => panic!("Not a literal"),
+                let nested_args = value_pairs.nested.pop().unwrap().into_value();
+                match nested_args {
+                    syn::NestedMeta::Meta(syn::Meta::NameValue(value)) => {
+                        if value.path.segments[0].ident != "each" {
+                            return gen_error(value_pairs);
+                        }
+                        value
+                    }
+                    other => return gen_error(other),
+                }
+            }
+            Err(e) => {
+                return Some((false, e.to_compile_error()));
+            }
+            _ => return gen_error(group),
         };
 
-        match syn::Lit::new(arg) {
+        match meta.lit {
             syn::Lit::Str(s) => {
                 let arg_ident = syn::Ident::new(&s.value(), s.span());
                 let ty = unwrap_inner_type("Vec", &f.ty).unwrap();
