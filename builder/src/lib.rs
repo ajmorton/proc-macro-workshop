@@ -121,7 +121,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let set_method = if let Some(inner_type) = unwrap_inner_type("Option", &f.ty) {
             quote! {
                 pub fn #inner_name(&mut self, #inner_name: #inner_type) -> &mut Self {
-                    self.#inner_name = Some(#inner_name);
+                    self.#inner_name = std::option::Option::Some(#inner_name);
                     self
                 }
             }
@@ -135,7 +135,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         } else {
             quote! {
                 pub fn #inner_name(&mut self, #inner_name: #inner_type) -> &mut Self {
-                    self.#inner_name = Some(#inner_name);
+                    self.#inner_name = std::option::Option::Some(#inner_name);
                     self
                 }
             }
@@ -157,7 +157,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let inner_name = &f.ident;
         if builder_of(&f).is_some() {
             quote! {
-                #inner_name: Vec::new()
+                #inner_name: std::vec::Vec::new()
             }
         } else {
             quote! {
@@ -195,7 +195,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         impl #ident_builder {
-            pub fn build(&mut self) -> Result<#ident, Box<dyn Error>> {
+            pub fn build(&mut self) -> std::result::Result<#ident, std::boxed::Box<dyn Error>> {
                 Ok(#ident{
                     #(#build_fields,)*
                 })
