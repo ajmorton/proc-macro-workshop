@@ -13,7 +13,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let ident = &tree.ident;
     let ident_builder = Ident::new(&format!("{}Builder", ident), ident.span());
 
-    // untangling this gnarly path plagiarized directly from jonhoo's stream on this workshop
     let fields = if let Struct(DataStruct {
         fields: Named(FieldsNamed { ref named, .. }),
         ..
@@ -43,10 +42,57 @@ pub fn derive(input: TokenStream) -> TokenStream {
         None
     }
 
+    fn builder_of(f: &syn::Field) -> Option<proc_macro2::Group> {
+        for attr in &f.attrs {
+            if attr.path.segments.len() == 1 && attr.path.segments[0].ident == "builder" {
+                let mut stream = attr.tokens.clone().into_iter();
+                if let Some(proc_macro2::TokenTree::Group(group)) = stream.next() {
+                    return Some(group);
+                }
+            }
+        }
+        None
+    }
+
+    fn extend_method(f: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
+        let name = f.ident.as_ref().unwrap();
+        let group = builder_of(f)?;
+        let mut tokens = group.stream().into_iter();
+
+        match tokens.next().unwrap() {
+            TokenTree::Ident(ref i) => assert_eq!("each", i.to_string()),
+            _ => panic!("Not an ident or punct"),
+        }
+        match tokens.next().unwrap() {
+            TokenTree::Punct(ref p) => assert_eq!('=', p.as_char()),
+            _ => panic!("Not an ident or punct"),
+        }
+
+        let arg = match tokens.next().unwrap() {
+            TokenTree::Literal(lit) => lit,
+            _ => panic!("Not a literal"),
+        };
+
+        match syn::Lit::new(arg) {
+            syn::Lit::Str(s) => {
+                let arg_ident = syn::Ident::new(&s.value(), s.span());
+                let ty = unwrap_inner_type("Vec", &f.ty).unwrap();
+                let method = quote! {
+                    pub fn #arg_ident(&mut self, #arg_ident: #ty) -> &mut Self {
+                        self.#name.push(#arg_ident);
+                        self
+                    }
+                };
+                Some((&arg_ident == name, method))
+            }
+            _ => panic!("Bad string ident"),
+        }
+    }
+
     let opt_fields = fields.iter().map(|f| {
         let inner_name = &f.ident;
         let inner_type = &f.ty;
-        if unwrap_inner_type("Option", &f.ty).is_some() {
+        if unwrap_inner_type("Option", &f.ty).is_some() || builder_of(&f).is_some() {
             quote! {
                 #inner_name: #inner_type
             }
@@ -57,58 +103,21 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     });
 
-    // TODO: 2:16:05, working on bool to control for methods/extend_methods not colliding
-    let extend_methods = fields.iter().filter_map(|f| {
-        let name = &f.ident;
-        for attr in &f.attrs {
-            if attr.path.segments.len() == 1 && attr.path.segments[0].ident == "builder" {
-                let mut stream = attr.tokens.clone().into_iter();
-                if let Some(proc_macro2::TokenTree::Group(group)) = stream.next() {
-                    let mut tokens = group.stream().into_iter();
-                    match tokens.next().unwrap() {
-                        TokenTree::Ident(ref i) => assert_eq!("each", i.to_string()),
-                        _ => panic!("Not an ident or punct"),
-                    }
-                    match tokens.next().unwrap() {
-                        TokenTree::Punct(ref p) => assert_eq!('=', p.as_char()),
-                        _ => panic!("Not an ident or punct"),
-                    }
-
-                    let arg = match tokens.next().unwrap() {
-                        TokenTree::Literal(lit) => lit,
-                        _ => panic!("Not a literal"),
-                    };
-
-                    match syn::Lit::new(arg) {
-                        syn::Lit::Str(s) => {
-                            let arg_ident = syn::Ident::new(&s.value(), s.span());
-                            let ty = unwrap_inner_type("Vec", &f.ty).unwrap();
-                            return Some(quote! {
-                                pub fn #arg_ident(&mut self, #arg_ident: #ty) -> &mut Self {
-                                    if let Some(ref mut vals) = self.#name {
-                                        vals.push(#arg_ident);
-                                    } else {
-                                        self.#name = Some(vec![#arg_ident]);
-                                    }
-                                    self
-                                }
-                            });
-                        }
-                        _ => panic!("Bad string ident"),
-                    }
-                }
-            }
-        }
-        None
-    });
-
     let methods = fields.iter().map(|f| {
         let inner_name = &f.ident;
         let inner_type = &f.ty;
-        if let Some(inner_type) = unwrap_inner_type("Option", &f.ty) {
+
+        let set_method = if let Some(inner_type) = unwrap_inner_type("Option", &f.ty) {
             quote! {
                 pub fn #inner_name(&mut self, #inner_name: #inner_type) -> &mut Self {
                     self.#inner_name = Some(#inner_name);
+                    self
+                }
+            }
+        } else if builder_of(&f).is_some() {
+            quote! {
+                pub fn #inner_name(&mut self, #inner_name: #inner_type) -> &mut Self {
+                    self.#inner_name = #inner_name;
                     self
                 }
             }
@@ -119,19 +128,36 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     self
                 }
             }
+        };
+
+        match extend_method(&f) {
+            None => set_method,
+            Some((true, extend_method)) => extend_method,
+            Some((false, extend_method)) => {
+                quote! {
+                    #set_method
+                    #extend_method
+                }
+            }
         }
     });
 
     let nil_fields = fields.iter().map(|f| {
         let inner_name = &f.ident;
-        quote! {
-            #inner_name: None
+        if builder_of(&f).is_some() {
+            quote! {
+                #inner_name: Vec::new()
+            }
+        } else {
+            quote! {
+                #inner_name: None
+            }
         }
     });
 
     let build_fields = fields.iter().map(|f| {
         let inner_name = &f.ident;
-        if unwrap_inner_type("Option", &f.ty).is_some() {
+        if unwrap_inner_type("Option", &f.ty).is_some() || builder_of(f).is_some() {
             quote! {
                 #inner_name: self.#inner_name.clone()
             }
@@ -164,7 +190,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 })
             }
 
-            #(#extend_methods)*
             #(#methods)*
 
         }
