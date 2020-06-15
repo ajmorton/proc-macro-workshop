@@ -7,7 +7,7 @@ use syn::*;
 
 use proc_macro::TokenStream;
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let ident = &input.ident;
@@ -45,48 +45,61 @@ pub fn derive(input: TokenStream) -> TokenStream {
 // The fields that the builder operates on, with relevant type data
 struct BuilderField {
     ident: syn::Ident,
-    typ: syn::Type,
-    is_opt: bool
+    typ: syn::TypePath,
+    is_opt: bool,
+    each_arg: Option<syn::Ident>,
 }
 
-// Given an Option<T> type strip the option and return T
-fn strip_opt(path: &syn::TypePath) -> syn::Type {
+// Given a type with angled brackets (Option<T> / Vec<T>) strip the type and return T
+fn strip_angled(path: &syn::TypePath) -> syn::TypePath {
     if let PathArguments::AngleBracketed(args) = &path.path.segments[0].arguments {
-        if let GenericArgument::Type(Type::Path(p)) = &args.args[0] {
-            return syn::Type::Path(p.clone());
+        if let GenericArgument::Type(Type::Path(path)) = &args.args[0] {
+            return path.clone();
         }
     }
-    panic!(concat!("Can't extract T from Option<T> for type", stringify!(path)));
+    panic!(concat!("Can't extract T from type", stringify!(path)));
 }
 
 // get the type of a field. If the field is an Option<> then strip the option and set is_opt to true
-fn get_type(named_field: &syn::Field) -> (syn::Type, bool) {
-
+fn get_type(named_field: &syn::Field) -> (syn::TypePath, bool) {
     if let syn::Type::Path(path) = &named_field.ty {
         let is_opt = path.path.segments[0].ident == syn::Ident::new("Option", Span::call_site());
-        let typ = if is_opt {
-            strip_opt(path)
-        } else {
-            syn::Type::Path(path.clone())
-        };
-        (typ, is_opt)
+        (path.clone(), is_opt)
     } else {
         panic!("can't get type")
     }
 }
 
 // create the constructor for the builder (all fields = None)
-fn builder_constructor(ident: &syn::Ident, ident_builder: &syn::Ident, builder_fields: &Vec<BuilderField>) -> proc_macro2::TokenStream {
-    let field_names: Vec<_> = builder_fields.iter().map(|f| &f.ident).collect();
+fn builder_constructor(
+    ident: &syn::Ident,
+    ident_builder: &syn::Ident,
+    builder_fields: &Vec<BuilderField>,
+) -> proc_macro2::TokenStream {
+    let initialisers: Vec<_> = builder_fields
+        .iter()
+        .map(|field| initialiser(field))
+        .collect();
+
     quote!(
         impl #ident {
             pub fn builder() -> #ident_builder {
                 #ident_builder {
-                    #( #field_names: None , )*
+                    #( #initialisers , )*
                 }
             }
         }
     )
+}
+
+fn initialiser(field: &BuilderField) -> proc_macro2::TokenStream {
+    let field_name = &field.ident;
+
+    if field.each_arg.is_some() {
+        quote!(#field_name: vec!())
+    } else {
+        quote!(#field_name: None)
+    }
 }
 
 // setters for the builder
@@ -94,17 +107,44 @@ fn builder_setter(builder_field: &BuilderField) -> proc_macro2::TokenStream {
     let field_name = &builder_field.ident;
     let field_typ = &builder_field.typ;
 
-    quote!(
-        fn #field_name(&mut self, #field_name: #field_typ) -> &mut Self {
-            self.#field_name = Some(#field_name);
-            self
-        }
-    )
+    if let Some(each_arg) = &builder_field.each_arg {
+        let push = quote!(
+            fn #each_arg(&mut self, #each_arg: #field_typ) -> &mut Self {
+                self.#field_name.push(#each_arg);
+                self
+            }
+        );
+
+        let all_at_once = if each_arg.to_string() != field_name.to_string() {
+            quote!(
+                fn #field_name(&mut self, #field_name: Vec<#field_typ>) -> &mut Self {
+                    self.#field_name = #field_name.clone();
+                    self
+                }
+            )
+        } else {
+            quote!()
+        };
+
+        quote!(
+            #push
+            #all_at_once
+        )
+    } else {
+        quote!(
+            fn #field_name(&mut self, #field_name: #field_typ) -> &mut Self {
+                self.#field_name = Some(#field_name);
+                self
+            }
+        )
+    }
 }
 
 // the build() function to convert from the builder to the buildee
-fn builder_build_func(ident: &syn::Ident, builder_fields: &Vec<BuilderField>) -> proc_macro2::TokenStream {
-
+fn builder_build_func(
+    ident: &syn::Ident,
+    builder_fields: &Vec<BuilderField>,
+) -> proc_macro2::TokenStream {
     let none_checks: Vec<_> = builder_fields.iter().map(|f| none_check(f)).collect();
     let set_fields: Vec<_> = builder_fields.iter().map(|f| set_field(f)).collect();
 
@@ -123,8 +163,8 @@ fn builder_build_func(ident: &syn::Ident, builder_fields: &Vec<BuilderField>) ->
 // Fields that are optional in the buildee are not checked
 fn none_check(field: &BuilderField) -> proc_macro2::TokenStream {
     let field_name = &field.ident;
-    if field.is_opt {
-        quote!()    
+    if field.is_opt || field.each_arg.is_some() {
+        quote!()
     } else {
         quote!(
             if self.#field_name.clone() == None {
@@ -137,23 +177,47 @@ fn none_check(field: &BuilderField) -> proc_macro2::TokenStream {
 // set a fields in the buildee with the value in the builder
 fn set_field(field: &BuilderField) -> proc_macro2::TokenStream {
     let field_name = &field.ident;
-    if field.is_opt {
+    if field.is_opt || field.each_arg.is_some() {
         quote!(#field_name: self.#field_name.clone())
     } else {
         quote!(#field_name: self.#field_name.clone().unwrap())
     }
 }
 
-// Convert from a syn::Field to locally used BuilderField
-fn get_builder_field(field: &syn::Field) -> BuilderField {
+// get value in the #[each = value] attribute
+fn each_name(attrs: &Vec<syn::Attribute>) -> Option<proc_macro2::Ident> {
+    for attr in attrs {
+        if let Ok(syn::Meta::List(meta)) = attr.parse_meta() {
+            for item in meta.nested {
+                if let syn::NestedMeta::Meta(syn::Meta::NameValue(nv)) = &item {
+                    if let syn::Lit::Str(each_name) = &nv.lit {
+                        let each_name = each_name.value();
+                        return Some(syn::Ident::new(&each_name, Span::call_site()));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
 
-    if let Some(ident) = &field.ident {
-        let(typ, is_opt) = get_type(field);
+// Convert from a syn::Field to internal BuilderField type
+fn get_builder_field(field: &syn::Field) -> BuilderField {
+    let each_arg = each_name(&field.attrs);
+
+    if let Some(ident) = field.ident.clone() {
+        let (typ, is_opt) = get_type(field);
+        let typ = if is_opt || each_arg.is_some() {
+            strip_angled(&typ)
+        } else {
+            typ
+        };
 
         BuilderField {
-            ident: ident.clone(),
+            ident,
             typ,
-            is_opt
+            is_opt,
+            each_arg,
         }
     } else {
         panic!("Can't extract BuilderField details")
@@ -161,14 +225,18 @@ fn get_builder_field(field: &syn::Field) -> BuilderField {
 }
 
 // Return tokens for the builder struct
-fn builder_struct(builder_name: &syn::Ident, named_fields: &Vec<BuilderField>) -> proc_macro2::TokenStream {
-
-    let struct_fields = named_fields.iter().map(
-        |field: &BuilderField| { 
-            let (field_name, field_type) = (&field.ident, &field.typ);
+fn builder_struct(
+    builder_name: &syn::Ident,
+    named_fields: &Vec<BuilderField>,
+) -> proc_macro2::TokenStream {
+    let struct_fields = named_fields.iter().map(|field: &BuilderField| {
+        let (field_name, field_type) = (&field.ident, &field.typ);
+        if field.each_arg.is_some() {
+            quote!(#field_name: Vec<#field_type>)
+        } else {
             quote!(#field_name: Option<#field_type>)
         }
-    );
+    });
 
     quote!(
         pub struct #builder_name {
