@@ -21,29 +21,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
         _ => panic!("expected a struct with named fields"),
     };
 
-    let builder_fields: std::result::Result<Vec<_>, syn::Error> = named_fields.iter().map(|f| get_builder_field(f)).collect();
+    let builder_fields: std::result::Result<Vec<_>, syn::Error> =
+        named_fields.iter().map(|f| get_builder_field(f)).collect();
 
     match builder_fields {
         Ok(builder_fields) => {
             let builder_struct = builder_struct(&ident_builder, &builder_fields);
             let builder_constructor = builder_constructor(&ident, &ident_builder, &builder_fields);
-            let builder_setters: Vec<_> = builder_fields.iter().map(|f| builder_setter(f)).collect();
+            let builder_setters: Vec<_> =
+                builder_fields.iter().map(|f| builder_setter(f)).collect();
             let builder_build_func = builder_build_func(&ident, &builder_fields);
-        
+
             let builder_impl = quote!(
                 impl #ident_builder {
                     #(#builder_setters)*
                     #builder_build_func
                 }
             );
-        
+
             proc_macro::TokenStream::from(quote! {
                 #builder_struct
                 #builder_constructor
                 #builder_impl
             })
-        },
-        Err(err) => err.to_compile_error().into()
+        }
+        Err(err) => err.to_compile_error().into(),
     }
 }
 
@@ -103,7 +105,7 @@ fn initialiser(field: &BuilderField) -> proc_macro2::TokenStream {
     if field.each_arg.is_some() {
         quote!(#field_name: vec!())
     } else {
-        quote!(#field_name: None)
+        quote!(#field_name: std::option::Option::None)
     }
 }
 
@@ -122,7 +124,7 @@ fn builder_setter(builder_field: &BuilderField) -> proc_macro2::TokenStream {
 
         let all_at_once = if each_arg.to_string() != field_name.to_string() {
             quote!(
-                fn #field_name(&mut self, #field_name: Vec<#field_typ>) -> &mut Self {
+                fn #field_name(&mut self, #field_name: std::vec::Vec<#field_typ>) -> &mut Self {
                     self.#field_name = #field_name.clone();
                     self
                 }
@@ -138,7 +140,7 @@ fn builder_setter(builder_field: &BuilderField) -> proc_macro2::TokenStream {
     } else {
         quote!(
             fn #field_name(&mut self, #field_name: #field_typ) -> &mut Self {
-                self.#field_name = Some(#field_name);
+                self.#field_name = std::option::Option::Some(#field_name);
                 self
             }
         )
@@ -154,10 +156,10 @@ fn builder_build_func(
     let set_fields: Vec<_> = builder_fields.iter().map(|f| set_field(f)).collect();
 
     quote!(
-        pub fn build(&mut self) -> Result<#ident, Box<dyn std::error::Error>> {
+        pub fn build(&mut self) -> std::result::Result<#ident, std::boxed::Box<dyn std::error::Error>> {
             #(#none_checks)*
 
-            Ok( #ident {
+            std::result::Result::Ok( #ident {
                 #(#set_fields ,)*
             })
         }
@@ -172,7 +174,7 @@ fn none_check(field: &BuilderField) -> proc_macro2::TokenStream {
         quote!()
     } else {
         quote!(
-            if self.#field_name.clone() == None {
+            if self.#field_name.clone() == std::option::Option::None {
                 return Err(concat!(stringify!(#field_name), " is None !!").into());
             }
         )
@@ -190,19 +192,26 @@ fn set_field(field: &BuilderField) -> proc_macro2::TokenStream {
 }
 
 // get value in the #[each = value] attribute
-fn each_name(attrs: &Vec<syn::Attribute>) -> std::result::Result<Option<proc_macro2::Ident>, syn::Error> {
+fn each_name(
+    attrs: &Vec<syn::Attribute>,
+) -> std::result::Result<Option<proc_macro2::Ident>, syn::Error> {
     for attr in attrs {
         if let Ok(syn::Meta::List(meta)) = attr.parse_meta() {
             for item in &meta.nested {
                 if let syn::NestedMeta::Meta(syn::Meta::NameValue(nv)) = &item {
-                    if let Some(ident) =  nv.path.get_ident() {
+                    if let Some(ident) = nv.path.get_ident() {
                         if ident == &syn::Ident::new("each", Span::call_site()) {
                             if let syn::Lit::Str(each_name) = &nv.lit {
-                                let each_name = each_name.value();
-                                return Ok(Some(syn::Ident::new(&each_name, Span::call_site())));
-                            }        
+                                return Ok(Some(syn::Ident::new(
+                                    &each_name.value(),
+                                    Span::call_site(),
+                                )));
+                            }
                         } else {
-                            return Err(syn::Error::new_spanned(&meta, "expected `builder(each = \"...\")`"));
+                            return Err(syn::Error::new_spanned(
+                                &meta,
+                                "expected `builder(each = \"...\")`",
+                            ));
                         }
                     }
                 }
@@ -231,7 +240,10 @@ fn get_builder_field(field: &syn::Field) -> std::result::Result<BuilderField, sy
             each_arg,
         })
     } else {
-        Err(syn::Error::new::<&str>(Span::call_site(), "Can't extract BuilderField details".into()))
+        Err(syn::Error::new::<&str>(
+            Span::call_site(),
+            "Can't extract BuilderField details".into(),
+        ))
     }
 }
 
@@ -243,9 +255,9 @@ fn builder_struct(
     let struct_fields = named_fields.iter().map(|field: &BuilderField| {
         let (field_name, field_type) = (&field.ident, &field.typ);
         if field.each_arg.is_some() {
-            quote!(#field_name: Vec<#field_type>)
+            quote!(#field_name: std::vec::Vec<#field_type>)
         } else {
-            quote!(#field_name: Option<#field_type>)
+            quote!(#field_name: std::option::Option<#field_type>)
         }
     });
 
