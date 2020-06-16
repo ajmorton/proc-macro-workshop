@@ -21,25 +21,30 @@ pub fn derive(input: TokenStream) -> TokenStream {
         _ => panic!("expected a struct with named fields"),
     };
 
-    let builder_fields: Vec<_> = named_fields.iter().map(|f| get_builder_field(f)).collect();
+    let builder_fields: std::result::Result<Vec<_>, syn::Error> = named_fields.iter().map(|f| get_builder_field(f)).collect();
 
-    let builder_struct = builder_struct(&ident_builder, &builder_fields);
-    let builder_constructor = builder_constructor(&ident, &ident_builder, &builder_fields);
-    let builder_setters: Vec<_> = builder_fields.iter().map(|f| builder_setter(f)).collect();
-    let builder_build_func = builder_build_func(&ident, &builder_fields);
-
-    let builder_funcs = quote!(
-        impl #ident_builder {
-            #(#builder_setters)*
-            #builder_build_func
-        }
-    );
-
-    proc_macro::TokenStream::from(quote! {
-        #builder_struct
-        #builder_constructor
-        #builder_funcs
-    })
+    match builder_fields {
+        Ok(builder_fields) => {
+            let builder_struct = builder_struct(&ident_builder, &builder_fields);
+            let builder_constructor = builder_constructor(&ident, &ident_builder, &builder_fields);
+            let builder_setters: Vec<_> = builder_fields.iter().map(|f| builder_setter(f)).collect();
+            let builder_build_func = builder_build_func(&ident, &builder_fields);
+        
+            let builder_impl = quote!(
+                impl #ident_builder {
+                    #(#builder_setters)*
+                    #builder_build_func
+                }
+            );
+        
+            proc_macro::TokenStream::from(quote! {
+                #builder_struct
+                #builder_constructor
+                #builder_impl
+            })
+        },
+        Err(err) => err.to_compile_error().into()
+    }
 }
 
 // The fields that the builder operates on, with relevant type data
@@ -185,25 +190,31 @@ fn set_field(field: &BuilderField) -> proc_macro2::TokenStream {
 }
 
 // get value in the #[each = value] attribute
-fn each_name(attrs: &Vec<syn::Attribute>) -> Option<proc_macro2::Ident> {
+fn each_name(attrs: &Vec<syn::Attribute>) -> std::result::Result<Option<proc_macro2::Ident>, syn::Error> {
     for attr in attrs {
         if let Ok(syn::Meta::List(meta)) = attr.parse_meta() {
-            for item in meta.nested {
+            for item in &meta.nested {
                 if let syn::NestedMeta::Meta(syn::Meta::NameValue(nv)) = &item {
-                    if let syn::Lit::Str(each_name) = &nv.lit {
-                        let each_name = each_name.value();
-                        return Some(syn::Ident::new(&each_name, Span::call_site()));
+                    if let Some(ident) =  nv.path.get_ident() {
+                        if ident == &syn::Ident::new("each", Span::call_site()) {
+                            if let syn::Lit::Str(each_name) = &nv.lit {
+                                let each_name = each_name.value();
+                                return Ok(Some(syn::Ident::new(&each_name, Span::call_site())));
+                            }        
+                        } else {
+                            return Err(syn::Error::new_spanned(&meta, "expected `builder(each = \"...\")`"));
+                        }
                     }
                 }
             }
         }
     }
-    None
+    Ok(None)
 }
 
 // Convert from a syn::Field to internal BuilderField type
-fn get_builder_field(field: &syn::Field) -> BuilderField {
-    let each_arg = each_name(&field.attrs);
+fn get_builder_field(field: &syn::Field) -> std::result::Result<BuilderField, syn::Error> {
+    let each_arg = each_name(&field.attrs)?;
 
     if let Some(ident) = field.ident.clone() {
         let (typ, is_opt) = get_type(field);
@@ -213,14 +224,14 @@ fn get_builder_field(field: &syn::Field) -> BuilderField {
             typ
         };
 
-        BuilderField {
+        Ok(BuilderField {
             ident,
             typ,
             is_opt,
             each_arg,
-        }
+        })
     } else {
-        panic!("Can't extract BuilderField details")
+        Err(syn::Error::new::<&str>(Span::call_site(), "Can't extract BuilderField details".into()))
     }
 }
 
